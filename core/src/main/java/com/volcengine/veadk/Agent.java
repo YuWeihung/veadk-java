@@ -36,6 +36,7 @@ import com.volcengine.veadk.memory.SaveSessionToMemoryCallback;
 import com.volcengine.veadk.memory.ShortTermMemory;
 import com.volcengine.veadk.model.ArkLlm;
 import com.volcengine.veadk.model.ArkLlmConfig;
+import com.volcengine.veadk.model.FallbackLlm;
 import com.volcengine.veadk.model.ModelProvider;
 import com.volcengine.veadk.model.OpenAiCompatibleLlm;
 import com.volcengine.veadk.model.OpenAiCompatibleLlmConfig;
@@ -156,6 +157,8 @@ public final class Agent extends LlmAgent {
         private List<String> explicitToolNames = List.of();
         private List<String> autoToolNames = List.of();
         private boolean explicitModelConfigured;
+        private BaseLlm explicitModel;
+        private List<BaseLlm> modelFallbacks = List.of();
         private ModelProvider modelProvider;
         private String modelApiKey;
         private String modelApiBase;
@@ -172,6 +175,16 @@ public final class Agent extends LlmAgent {
             description(DEFAULT_DESCRIPTION);
             instruction(DEFAULT_INSTRUCTION);
             modelName(DEFAULT_MODEL_NAME);
+        }
+
+        /** Sets ordered fallback endpoints, each with its own model and credentials. */
+        public Builder modelFallbacks(BaseLlm... fallbacks) {
+            return modelFallbacks(Arrays.asList(fallbacks));
+        }
+
+        public Builder modelFallbacks(List<? extends BaseLlm> fallbacks) {
+            this.modelFallbacks = List.copyOf(fallbacks);
+            return this;
         }
 
         public Builder modelName(String modelName) {
@@ -364,6 +377,7 @@ public final class Agent extends LlmAgent {
             super.model(resolvedModel);
             this.veadkModelName = Objects.requireNonNullElse(resolvedModel.model(), "");
             this.explicitModelConfigured = true;
+            this.explicitModel = resolvedModel;
             return this;
         }
 
@@ -573,29 +587,34 @@ public final class Agent extends LlmAgent {
 
         private void configureModel() {
             if (explicitModelConfigured) {
+                super.model(withFallbacks(explicitModel));
                 return;
             }
             ResolvedModel resolvedModel = resolveModel(modelProvider, veadkModelName);
             this.veadkModelName = resolvedModel.modelName();
-            switch (resolvedModel.provider()) {
-                case ARK ->
-                        super.model(
+            BaseLlm primary =
+                    switch (resolvedModel.provider()) {
+                        case ARK ->
                                 new ArkLlm(
                                         ArkLlmConfig.builder()
                                                 .modelName(resolvedModel.modelName())
                                                 .apiKey(modelApiKey)
                                                 .apiBase(modelApiBase)
                                                 .thinking(modelThinking)
-                                                .build()));
-                case OPENAI_COMPATIBLE ->
-                        super.model(
+                                                .build());
+                        case OPENAI_COMPATIBLE ->
                                 new OpenAiCompatibleLlm(
                                         OpenAiCompatibleLlmConfig.builder()
                                                 .modelName(resolvedModel.modelName())
                                                 .apiKey(modelApiKey)
                                                 .baseUrl(modelApiBase)
-                                                .build()));
-            }
+                                                .build());
+                    };
+            super.model(withFallbacks(primary));
+        }
+
+        private BaseLlm withFallbacks(BaseLlm primary) {
+            return modelFallbacks.isEmpty() ? primary : new FallbackLlm(primary, modelFallbacks);
         }
 
         private static ResolvedModel resolveModel(
