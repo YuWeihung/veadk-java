@@ -47,7 +47,14 @@ public final class IdentityAuthorization {
 
     public Callbacks.BeforeToolCallback beforeToolCallback() {
         return (invocation, tool, args, toolContext) ->
-                Maybe.fromCallable(() -> authorizeTool(invocation, tool));
+                Maybe.fromCallable(
+                        () ->
+                                authorizeTool(
+                                        invocation,
+                                        tool,
+                                        toolContext == null
+                                                ? invocation.session().state()
+                                                : toolContext.state()));
     }
 
     private Content authorizeAgent(Map<String, Object> state, String agentName, String userId) {
@@ -70,13 +77,11 @@ public final class IdentityAuthorization {
         }
     }
 
-    private Map<String, Object> authorizeTool(InvocationContext invocation, BaseTool tool) {
+    private Map<String, Object> authorizeTool(
+            InvocationContext invocation, BaseTool tool, Map<String, Object> state) {
         try {
             String agentName = invocation.agent().name();
-            Claims claims =
-                    claims(
-                            tokenManager.get(
-                                    invocation.session().state(), agentName, invocation.userId()));
+            Claims claims = claims(tokenManager.get(state, agentName, invocation.userId()));
             if (claims.userId == null || claims.actors.isEmpty()) return Map.of("result", FAILURE);
             PermissionRequest request = request(claims, "tool", tool.name(), claims.actors);
             return client.checkPermission(request)
