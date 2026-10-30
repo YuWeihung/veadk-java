@@ -51,11 +51,8 @@ class IdentitySecurityTest {
         assertThat(manager.get(state, "agent-a", "refresh")).isEqualTo("agent-a:refresh");
 
         assertThat(calls).hasValue(4);
-        assertThat(state)
-                .containsKeys(
-                        "workload_token:agent-a:user-a",
-                        "workload_token:agent-b:user-a",
-                        "workload_token:agent-a:refresh");
+        assertThat(state).hasSize(3);
+        assertThat(state.keySet()).allMatch(key -> key.startsWith("workload_token:v2:"));
     }
 
     @Test
