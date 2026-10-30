@@ -105,7 +105,7 @@ public final class HttpIdentityClient implements IdentityClient {
         } else {
             action = "GetWorkloadAccessToken";
         }
-        JsonNode response = post("/" + action + "/" + VERSION + "/id/post/application_json/", body);
+        JsonNode response = post(action, body);
         String token = requiredResponseText(response, "WorkloadAccessToken");
         String expiresAt = requiredResponseText(response, "ExpiresAt");
         return new WorkloadToken(
@@ -122,8 +122,7 @@ public final class HttpIdentityClient implements IdentityClient {
         body.put(
                 "OriginalCallers",
                 request.originalCallers().stream().map(HttpIdentityClient::principal).toList());
-        JsonNode response =
-                post("/CheckPermission/" + VERSION + "/id/post/application_json/", body);
+        JsonNode response = post("CheckPermission", body);
         JsonNode allowed = response.get("Allowed");
         if (allowed == null || !allowed.isBoolean())
             throw new IllegalStateException("Identity response is missing Allowed.");
@@ -134,7 +133,7 @@ public final class HttpIdentityClient implements IdentityClient {
     public String getApiKey(String providerName, String identityToken) throws Exception {
         JsonNode response =
                 post(
-                        "/GetResourceApiKey/" + VERSION + "/id/post/application_json/",
+                        "GetResourceApiKey",
                         Map.of(
                                 "ProviderName",
                                 requireText(providerName, "providerName"),
@@ -159,8 +158,7 @@ public final class HttpIdentityClient implements IdentityClient {
         if (scopes != null && !scopes.isEmpty()) body.put("Scopes", List.copyOf(scopes));
         if (redirectUrl != null && !redirectUrl.isBlank()) body.put("RedirectUrl", redirectUrl);
         if (forceAuthentication) body.put("ForceAuthentication", true);
-        JsonNode response =
-                post("/GetResourceOauth2Token/" + VERSION + "/id/post/application_json/", body);
+        JsonNode response = post("GetResourceOauth2Token", body);
         JsonNode token = response.get("AccessToken");
         if (token != null && token.isTextual() && !token.textValue().isBlank()) {
             return new OAuth2Credential(OAuth2Credential.Type.TOKEN, token.textValue());
@@ -173,12 +171,13 @@ public final class HttpIdentityClient implements IdentityClient {
                 "Identity response contains neither AccessToken nor AuthorizationUrl.");
     }
 
-    private JsonNode post(String path, Map<String, Object> value) throws Exception {
+    private JsonNode post(String action, Map<String, Object> value) throws Exception {
         byte[] body = mapper.writeValueAsBytes(value);
-        URI uri = endpoint.resolve(path);
+        String query = "Action=" + action + "&Version=" + VERSION;
+        URI uri = endpoint.resolve("/?" + query);
         Map<String, String> headers =
                 VolcengineV4Signer.sign(
-                        uri, "", body, region, "id", accessKey, secretKey, sessionToken, clock);
+                        uri, query, body, region, "id", accessKey, secretKey, sessionToken, clock);
         HttpRequest.Builder request =
                 HttpRequest.newBuilder(uri)
                         .timeout(timeout)
@@ -186,11 +185,40 @@ public final class HttpIdentityClient implements IdentityClient {
         headers.forEach(request::header);
         HttpResponse<byte[]> response =
                 httpClient.send(request.build(), HttpResponse.BodyHandlers.ofByteArray());
-        if (response.statusCode() < 200 || response.statusCode() >= 300) {
+        JsonNode parsed;
+        try {
+            parsed = mapper.readTree(response.body());
+        } catch (java.io.IOException e) {
+            // Jackson exception messages can include response fragments containing credentials.
             throw new IllegalStateException(
-                    "Identity request failed with HTTP " + response.statusCode() + ".");
+                    "Identity response is not valid JSON (HTTP " + response.statusCode() + ").");
         }
-        return mapper.readTree(response.body());
+        JsonNode metadata = parsed == null ? mapper.nullNode() : parsed.path("ResponseMetadata");
+        JsonNode error = metadata.path("Error");
+        if (response.statusCode() < 200
+                || response.statusCode() >= 300
+                || (!error.isMissingNode() && !error.isNull())) {
+            // Include only bounded identifiers, never the response body or service Message:
+            // either can contain JWTs, resource credentials or authorization URLs.
+            throw new IllegalStateException(
+                    "Identity request failed (HTTP "
+                            + response.statusCode()
+                            + ", code="
+                            + identifier(error.path("Code"))
+                            + ", requestId="
+                            + identifier(metadata.path("RequestId"))
+                            + ").");
+        }
+        JsonNode result = parsed == null ? null : parsed.get("Result");
+        if (result == null || !result.isObject()) {
+            throw new IllegalStateException("Identity response is missing Result object.");
+        }
+        return result;
+    }
+
+    private static String identifier(JsonNode value) {
+        String text = value.asText("");
+        return text.matches("[A-Za-z0-9_.:-]{1,128}") ? text : "unknown";
     }
 
     private static Map<String, String> principal(PermissionRequest.Principal value) {
