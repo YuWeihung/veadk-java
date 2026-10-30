@@ -25,7 +25,29 @@ Agent agent = Agent.builder()
         .build();
 ```
 
-工具实现可通过 `IdentityCredentials.workloadToken(...)`、`apiKey(...)` 或 `oauth2(...)` 获取受管凭证，再注入实际的出站请求。API Key 按 Agent、用户、Provider 缓存；OAuth2 用户联邦可能返回 `AUTHORIZATION_URL`，调用方应展示给用户完成授权。
+工具实现可通过 `IdentityCredentials.workloadToken(...)`、`apiKey(...)` 或 `oauth2(...)` 获取受管凭证，再注入实际的出站请求。API Key 按 Agent、用户、Provider 和上游委托上下文缓存；OAuth2 用户联邦可能返回 `AUTHORIZATION_URL`，调用方应展示给用户完成授权。
+
+## 上游 JWT 与委托链
+
+不带上游 JWT 时，保持按用户 ID（或纯工作负载）获取令牌的行为。需要接续委托链时，可显式调用：
+
+```java
+WorkloadTokenManager tokens = new WorkloadTokenManager(identityClient);
+String childToken = tokens.get(invocationState, "child-agent", userId, verifiedUpstreamJwt);
+```
+
+默认的授权回调、`IdentityCredentials` 和 `IdentityOAuth2Tool` 从本次调用可见的 State 中读取同一输入：
+
+```java
+invocationState.put(WorkloadTokenManager.UPSTREAM_TOKEN_STATE_KEY, verifiedUpstreamJwt);
+String childToken = credentials.workloadToken(invocationState, "child-agent", userId);
+```
+
+`UPSTREAM_TOKEN_STATE_KEY` 为 `temp:veadk:identity:upstream_token`。应由经过认证的请求入口提供上游 JWT，并确保它仅对本次调用的 CallbackContext / ToolContext State 可见；下一次请求没有上游令牌时应清除该输入。它不是模型或工具参数，不应写入持久用户资料或供不同身份的并发请求共用。工具授权优先使用 ToolContext State，以便读取本次调用的临时身份上下文。
+
+输入可为原始 JWT 或 `Bearer <JWT>`。有上游 JWT 时发送 `GetWorkloadAccessTokenForJWT`，不再同时发送 UserId；没有上游时保留 UserId 路径。刷新仍使用相同的上游输入。代码不会把 Session 中上一次获取的令牌自动当作父调用者，避免串联同一 Session 中无关的请求或兄弟 Agent。
+
+此接入负责把上游 JWT 传给 Identity 进行交换，不会新增 A2A 入站认证中间件，也不会把本地解析 JWT 声明当作签名认证。
 
 需要自动完成 OAuth2 授权并恢复函数工具调用时，可包装 ADK `FunctionTool`：
 
@@ -60,7 +82,9 @@ LLM Shield 使用以下环境变量：
 - `TOOL_LLM_SHIELD_REGION`，回退到 `REGION`，默认 `cn-beijing`
 - `TOOL_LLM_SHIELD_URL`，默认 `https://{region}.sdk.access.llm-shield.omini-shield.com`
 
-Identity 工作负载令牌按 `workload_token:{agent}:{user}` 缓存在 ADK Session state 中，并在到期前 60 秒刷新。JWT 只用于解析 Identity 已签发令牌里的 `sub` 与嵌套 `act` 委托链，不被当作本地认证验证。
+Identity 使用根路径上的 `Action` / `Version` 查询，并将实际查询和 JSON 请求体一并签名。成功响应从 OpenAPI `Result` 对象中取值；HTTP 错误或 `ResponseMetadata.Error` 均抛出异常。异常保留 HTTP 状态、错误码和 RequestId，不包含完整响应、服务端 Message、JWT 或凭据值。
+
+Identity 工作负载令牌按 Agent、用户和上游 JWT 的作用域缓存在 ADK State 中，并在到期前 60 秒刷新。缓存键采用带长度分隔的 SHA-256 摘要，格式为 `workload_token:v2:<scope-hash>`；API Key 作用域额外包含 Provider。原始上游 JWT 不出现在缓存键里。旧格式缓存不会复用，升级后的第一次调用会重新获取令牌。JWT 只用于解析 Identity 已签发令牌里的 `sub` 与嵌套 `act` 委托链，不被当作本地认证验证。
 
 ## Python 对齐与 Java 差异
 
