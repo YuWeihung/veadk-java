@@ -19,10 +19,13 @@ public final class IdentityCredentials {
     public String apiKey(
             Map<String, Object> state, String agentName, String userId, String providerName)
             throws Exception {
-        String key = "api_key:" + agentName + ":" + userId + ":" + providerName;
+        String upstream = WorkloadTokenManager.upstreamToken(state);
+        String key =
+                WorkloadTokenManager.cacheKey("api_key", agentName, userId, upstream, providerName);
         Object cached = state.get(key);
         if (cached instanceof String value && !value.isBlank()) return value;
-        String value = client.getApiKey(providerName, tokens.get(state, agentName, userId));
+        String value =
+                client.getApiKey(providerName, tokens.get(state, agentName, userId, upstream));
         if (value == null || value.isBlank())
             throw new IllegalStateException("Identity response is missing ApiKey.");
         state.put(key, value);
