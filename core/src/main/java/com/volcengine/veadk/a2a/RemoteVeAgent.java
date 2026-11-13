@@ -24,6 +24,8 @@ import io.a2a.client.Client;
 import io.a2a.client.config.ClientConfig;
 import io.a2a.client.http.A2AHttpClient;
 import io.a2a.client.http.A2AHttpResponse;
+import io.a2a.client.transport.jsonrpc.JSONRPCTransport;
+import io.a2a.client.transport.jsonrpc.JSONRPCTransportConfigBuilder;
 import io.a2a.client.transport.rest.RestTransport;
 import io.a2a.client.transport.rest.RestTransportConfigBuilder;
 import io.a2a.spec.AgentCard;
@@ -167,22 +169,33 @@ public final class RemoteVeAgent extends BaseAgent {
                 A2AHttpClient transport =
                         httpClient == null ? new VeA2AHttpClient(timeout) : httpClient;
                 if (authToken != null && !authToken.isBlank() && authMethod != null) {
-                    transport = new AuthenticatedHttpClient(transport, authMethod, authToken);
+                    transport =
+                            new AuthenticatedHttpClient(
+                                    transport, authMethod, authToken, URI.create(url));
                 }
-                AgentCard discovered = A2A.getAgentCard(transport, url);
+                // An absolute well-known path otherwise drops a shared gateway's prefix.
                 AgentCard card =
-                        new AgentCard.Builder(discovered)
-                                .url(url)
-                                .preferredTransport(TransportProtocol.HTTP_JSON.asString())
-                                .additionalInterfaces(
-                                        List.of(
-                                                new AgentInterface(
-                                                        TransportProtocol.HTTP_JSON.asString(),
-                                                        url)))
-                                .build();
+                        A2A.getAgentCard(
+                                transport, url, url + "/.well-known/agent-card.json", Map.of());
+                // Keep the existing REST gateway behavior, including cards with internal URLs.
+                if (TransportProtocol.HTTP_JSON.asString().equals(card.preferredTransport())) {
+                    card =
+                            new AgentCard.Builder(card)
+                                    .url(url)
+                                    .additionalInterfaces(
+                                            List.of(
+                                                    new AgentInterface(
+                                                            TransportProtocol.HTTP_JSON.asString(),
+                                                            url)))
+                                    .build();
+                }
                 Client client =
                         Client.builder(card)
                                 .clientConfig(ClientConfig.builder().setStreaming(false).build())
+                                // Let the A2A SDK negotiate using the card's URLs and preference.
+                                .withTransport(
+                                        JSONRPCTransport.class,
+                                        new JSONRPCTransportConfigBuilder().httpClient(transport))
                                 .withTransport(
                                         RestTransport.class,
                                         new RestTransportConfigBuilder().httpClient(transport))
@@ -207,11 +220,14 @@ public final class RemoteVeAgent extends BaseAgent {
         private final A2AHttpClient delegate;
         private final AuthMethod method;
         private final String token;
+        private final URI origin;
 
-        private AuthenticatedHttpClient(A2AHttpClient delegate, AuthMethod method, String token) {
+        private AuthenticatedHttpClient(
+                A2AHttpClient delegate, AuthMethod method, String token, URI origin) {
             this.delegate = delegate;
             this.method = method;
             this.token = token;
+            this.origin = origin;
         }
 
         @Override
@@ -241,11 +257,24 @@ public final class RemoteVeAgent extends BaseAgent {
         }
 
         private <T extends A2AHttpClient.Builder<T>> T authenticate(T builder, String url) {
+            URI target = URI.create(url);
+            if (!origin.getScheme().equalsIgnoreCase(target.getScheme())
+                    || !origin.getHost().equalsIgnoreCase(target.getHost())
+                    || port(origin) != port(target)) {
+                throw new IllegalArgumentException(
+                        "Refusing to send A2A credentials to a different origin");
+            }
             builder.url(authenticatedUrl(url));
             if (method == AuthMethod.HEADER) {
                 builder.addHeader("Authorization", "Bearer " + token);
             }
             return builder;
+        }
+
+        private static int port(URI uri) {
+            return uri.getPort() >= 0
+                    ? uri.getPort()
+                    : "https".equalsIgnoreCase(uri.getScheme()) ? 443 : 80;
         }
 
         private final class AuthGet implements GetBuilder {

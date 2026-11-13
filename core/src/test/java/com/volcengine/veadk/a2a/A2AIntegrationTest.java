@@ -36,6 +36,15 @@ class A2AIntegrationTest {
 
     @Test
     void serverAndRemoteAgentExchangeMessageOverRest() throws Exception {
+        exchangeMessageOverRest(false);
+    }
+
+    @Test
+    void restKeepsCallerUrlWhenCardAdvertisesAnInternalAddress() throws Exception {
+        exchangeMessageOverRest(true);
+    }
+
+    private void exchangeMessageOverRest(boolean internalCardAddress) throws Exception {
         int port = availablePort();
         String url = "http://127.0.0.1:" + port;
         Agent served =
@@ -47,12 +56,17 @@ class A2AIntegrationTest {
 
         RemoteVeAgent remote = null;
         try (VeA2AServer server =
-                new VeA2AServer(served, url, "weather_app", ShortTermMemory.local())
+                new VeA2AServer(
+                                served,
+                                internalCardAddress ? "http://127.0.0.1:1" : url,
+                                "weather_app",
+                                ShortTermMemory.local())
                         .start("127.0.0.1", port)) {
             remote = RemoteVeAgent.builder().name("weather_agent").url(url).build();
             assertThat(remote.description()).isEqualTo("Weather specialist");
             assertThat(remote.agentCard().preferredTransport())
                     .isEqualTo(TransportProtocol.HTTP_JSON.asString());
+            assertThat(remote.agentCard().url()).isEqualTo(url);
             assertThat(new Runner(remote).run("What is the weather?"))
                     .isEqualTo("sunny in Beijing");
         } finally {

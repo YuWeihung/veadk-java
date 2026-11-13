@@ -19,16 +19,74 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.sun.net.httpserver.HttpServer;
 import com.volcengine.veadk.utils.JSONUtil;
 import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
 class AgentKitWrapperSessionTest {
+
+    @Test
+    void onlyChangesTheDefaultHttpsWhenHttpIsExplicitlyConfigured() {
+        assertThat(AgentKitWrapper.resolveScheme(null)).isEqualTo("https");
+        assertThat(AgentKitWrapper.resolveScheme(" ")).isEqualTo("https");
+        assertThat(AgentKitWrapper.resolveScheme("https")).isEqualTo("https");
+        assertThat(AgentKitWrapper.resolveScheme("http")).isEqualTo("http");
+        assertThatThrownBy(() -> AgentKitWrapper.resolveScheme("ftp"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("VOLCENGINE_AGENTKIT_SCHEME");
+    }
+
+    @Test
+    void doesNotShareManagementSchemeOrHostAcrossClients() {
+        try (var a = new AgentKitWrapper("example.invalid", "cn-beijing", "a", "a", k -> null);
+                var b = new AgentKitWrapper("other.invalid", "cn-beijing", "b", "b", k -> null)) {
+            a.setScheme("http");
+            assertThat(b.getServiceInfo().getScheme()).isEqualTo("https");
+            assertThat(b.getServiceInfo().getHost()).isEqualTo("other.invalid");
+            assertThat(a.getServiceInfo().getHost()).isEqualTo("example.invalid");
+        }
+    }
+
+    @Test
+    void sessionRequestsUseConfiguredHttpScheme() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        AtomicReference<String> query = new AtomicReference<>();
+        server.createContext(
+                "/",
+                exchange -> {
+                    try (exchange) {
+                        query.set(exchange.getRequestURI().getRawQuery());
+                        byte[] body =
+                                "{\"Result\":{\"SessionInfos\":[]}}"
+                                        .getBytes(StandardCharsets.UTF_8);
+                        exchange.sendResponseHeaders(200, body.length);
+                        exchange.getResponseBody().write(body);
+                    }
+                });
+        server.start();
+        try (var client =
+                new AgentKitWrapper(
+                        "127.0.0.1:" + server.getAddress().getPort(),
+                        "cn-beijing",
+                        "ak",
+                        "sk",
+                        Map.of("VOLCENGINE_AGENTKIT_SCHEME", "http")::get)) {
+            assertThat(client.listSessions("sandbox")).isEmpty();
+            assertThat(query.get()).contains("Action=ListSessions");
+            assertThat(client.getServiceInfo().getScheme()).isEqualTo("http");
+        } finally {
+            server.stop(0);
+        }
+    }
 
     @Test
     void listsEveryPageAndParsesExpiry() throws Exception {

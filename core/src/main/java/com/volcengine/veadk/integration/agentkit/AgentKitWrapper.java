@@ -17,6 +17,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.function.Function;
 import org.apache.http.Header;
 import org.apache.http.NameValuePair;
 import org.apache.http.message.BasicHeader;
@@ -46,23 +47,24 @@ public class AgentKitWrapper extends BaseServiceImpl implements AutoCloseable {
     private static final long SESSION_READY_TIMEOUT_MILLIS = 120_000;
     private static final long SESSION_POLL_INTERVAL_MILLIS = 1_000;
 
-    private static final ServiceInfo SERVICE_INFO =
-            new ServiceInfo(
-                    new HashMap<String, Object>() {
-                        {
-                            put(Const.CONNECTION_TIMEOUT, 5000);
-                            put(Const.SOCKET_TIMEOUT, 30000); // Sandbox might be slow
-                            put(Const.Scheme, "https");
-                            put(
-                                    Const.Header,
-                                    new ArrayList<Header>() {
-                                        {
-                                            add(new BasicHeader("Accept", "application/json"));
-                                        }
-                                    });
-                            put(Const.Credentials, new Credentials("cn-beijing", "agentkit"));
-                        }
-                    });
+    private static ServiceInfo serviceInfo() {
+        return new ServiceInfo(
+                new HashMap<String, Object>() {
+                    {
+                        put(Const.CONNECTION_TIMEOUT, 5000);
+                        put(Const.SOCKET_TIMEOUT, 30000); // Sandbox might be slow
+                        put(Const.Scheme, "https");
+                        put(
+                                Const.Header,
+                                new ArrayList<Header>() {
+                                    {
+                                        add(new BasicHeader("Accept", "application/json"));
+                                    }
+                                });
+                        put(Const.Credentials, new Credentials("cn-beijing", "agentkit"));
+                    }
+                });
+    }
 
     private static final Map<String, ApiInfo> API_INFO_LIST =
             new HashMap<String, ApiInfo>() {
@@ -94,13 +96,25 @@ public class AgentKitWrapper extends BaseServiceImpl implements AutoCloseable {
     }
 
     public AgentKitWrapper(String host, String region, String ak, String sk) {
-        super(SERVICE_INFO, API_INFO_LIST);
+        this(host, region, ak, sk, System::getenv);
+    }
+
+    AgentKitWrapper(
+            String host, String region, String ak, String sk, Function<String, String> env) {
+        super(serviceInfo(), API_INFO_LIST);
         this.setAccessKey(ak);
         this.setSecretKey(sk);
         this.setHost(host);
         this.getServiceInfo().setHost(host);
         this.setRegion(region);
         this.getServiceInfo().getCredentials().setRegion(region);
+        this.setScheme(resolveScheme(env.apply("VOLCENGINE_AGENTKIT_SCHEME")));
+    }
+
+    static String resolveScheme(String configured) {
+        if (configured == null || configured.isBlank()) return "https";
+        if ("http".equals(configured) || "https".equals(configured)) return configured;
+        throw new IllegalArgumentException("VOLCENGINE_AGENTKIT_SCHEME must be http or https");
     }
 
     @Override
